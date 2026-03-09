@@ -22,6 +22,7 @@ import base64
 import hashlib
 import getpass
 import subprocess
+import zlib
 from pathlib import Path
 from html.parser import HTMLParser
 from datetime import datetime
@@ -163,6 +164,11 @@ def load_conf(conf_path: Path = None) -> dict:
         "SHOW_MANIFEST_HTML": "yes",
         "ROLLBACK": "disk",
         "MAX_ROLLBACKS": "2",
+        "COMPRESS_THRESHOLD": "102400",
+        "SHOW_APPENDIX": "no",
+        "SHOW_CORPUS": "no",
+        "APPENDIX_PATH": "corpus/appendix.html",
+        "CORPUS_PATH": "corpus/rawcorpus.html",
     }
     if conf_path is None:
         for candidate in [Path("site.conf"), Path(__file__).parent / "site.conf"]:
@@ -195,17 +201,30 @@ def derive_key(passphrase: str, salt: bytes, iterations: int) -> bytes:
     return kdf.derive(passphrase.encode("utf-8"))
 
 
-def encrypt(plaintext: bytes, passphrase: str, iterations: int) -> dict:
+def encrypt(plaintext: bytes, passphrase: str, iterations: int,
+            compress_threshold: int = 0) -> dict:
+    compressed = False
+    data = plaintext
+    if compress_threshold > 0 and len(plaintext) >= compress_threshold:
+        data = zlib.compress(plaintext, level=9)
+        # Only use compression if it actually helps
+        if len(data) < len(plaintext):
+            compressed = True
+        else:
+            data = plaintext
     salt = os.urandom(SALT_LEN)
     iv   = os.urandom(IV_LEN)
     key  = derive_key(passphrase, salt, iterations)
-    ct   = AESGCM(key).encrypt(iv, plaintext, None)
-    return {
+    ct   = AESGCM(key).encrypt(iv, data, None)
+    result = {
         "salt": base64.urlsafe_b64encode(salt).decode(),
         "iv":   base64.urlsafe_b64encode(iv).decode(),
         "ct":   base64.urlsafe_b64encode(ct).decode(),
         "iter": iterations,
     }
+    if compressed:
+        result["z"] = True
+    return result
 
 
 def decrypt(enc: dict, passphrase: str) -> bytes:
@@ -213,7 +232,10 @@ def decrypt(enc: dict, passphrase: str) -> bytes:
     iv   = base64.urlsafe_b64decode(enc["iv"])
     ct   = base64.urlsafe_b64decode(enc["ct"])
     key  = derive_key(passphrase, salt, int(enc.get("iter", 260000)))
-    return AESGCM(key).decrypt(iv, ct, None)
+    data = AESGCM(key).decrypt(iv, ct, None)
+    if enc.get("z"):
+        data = zlib.decompress(data)
+    return data
 
 
 # ── HTML helpers ───────────────────────────────────────────────────────────────
@@ -407,7 +429,25 @@ async function unlock() {{
       {{ name: 'PBKDF2', salt: b64(enc.salt), iterations: parseInt(enc.iter) || 260000, hash: 'SHA-256' }},
       raw, {{ name: 'AES-GCM', length: 256 }}, false, ['decrypt']
     );
-    const plain = await crypto.subtle.decrypt({{ name: 'AES-GCM', iv: b64(enc.iv) }}, key, b64(enc.ct));
+    let plain = await crypto.subtle.decrypt({{ name: 'AES-GCM', iv: b64(enc.iv) }}, key, b64(enc.ct));
+    if (enc.z) {{
+      const ds = new DecompressionStream('deflate');
+      const writer = ds.writable.getWriter();
+      writer.write(new Uint8Array(plain));
+      writer.close();
+      const chunks = [];
+      const reader = ds.readable.getReader();
+      while (true) {{
+        const {{done, value}} = await reader.read();
+        if (done) break;
+        chunks.push(value);
+      }}
+      const total = chunks.reduce((s, c) => s + c.length, 0);
+      const out = new Uint8Array(total);
+      let off = 0;
+      for (const c of chunks) {{ out.set(c, off); off += c.length; }}
+      plain = out.buffer;
+    }}
     {save_pw}
     let html = new TextDecoder().decode(plain);
     const base = location.origin + location.pathname.replace(/[^/]*$/, '');
@@ -441,14 +481,14 @@ def needs_update(src: Path, dest: Path) -> bool:
 
 
 def encrypt_html_file(src, dest, passphrase, iterations, persist,
-                      sign=True, reveal=None):
+                      sign=True, reveal=None, compress_threshold=0):
     if not needs_update(src, dest):
         return False
     data = src.read_bytes()
     # Use filename (without extension) as fallback for generic titles like "Google"
     fallback = src.stem.replace("-", " ").replace("_", " ")
     title = extract_title(data.decode("utf-8", errors="replace"), fallback)
-    enc = encrypt(data, passphrase, iterations)
+    enc = encrypt(data, passphrase, iterations, compress_threshold)
     sig_armor = gpg_sign_data(json.dumps(enc).encode()) if sign else None
     wrapped = wrap_html_encrypted(enc, title, src.name, sig_armor, persist,
                                   reveal=reveal)
@@ -457,11 +497,12 @@ def encrypt_html_file(src, dest, passphrase, iterations, persist,
     return True
 
 
-def encrypt_binary_file(src, dest_enc, dest_sig, passphrase, iterations, sign=True):
+def encrypt_binary_file(src, dest_enc, dest_sig, passphrase, iterations,
+                        sign=True, compress_threshold=0):
     if not needs_update(src, dest_enc):
         return False
     data = src.read_bytes()
-    enc = encrypt(data, passphrase, iterations)
+    enc = encrypt(data, passphrase, iterations, compress_threshold)
     enc["filename"] = src.name
     enc_json = json.dumps(enc, indent=2)
     dest_enc.parent.mkdir(parents=True, exist_ok=True)
@@ -482,6 +523,7 @@ def cmd_encrypt(conf):
     use_tree   = conf.get("HASH_TREE", "flat") == "ternary"
     tree_depth = conf.get("HASH_TREE_DEPTH", 4)
     tree_rules = load_tree_conf(conf)
+    compress_threshold = int(conf.get("COMPRESS_THRESHOLD", 0))
 
     pp_file = utils_dir / "passphrase.txt"
     if not pp_file.exists() or not pp_file.stat().st_size:
@@ -533,7 +575,8 @@ def cmd_encrypt(conf):
                 tag = "reveal" if reveal_pw else "html"
                 if encrypt_html_file(src, dest_base,
                                      passphrase, iterations, persist,
-                                     reveal=reveal_pw):
+                                     reveal=reveal_pw,
+                                     compress_threshold=compress_threshold):
                     html_updated += 1
                     print(f"  [{tag}] {rel}")
             else:
@@ -541,7 +584,8 @@ def cmd_encrypt(conf):
                 enc_path = dest_base.parent / (src.name + ".enc")
                 sig_path = dest_base.parent / (src.name + ".enc.sig")
                 if encrypt_binary_file(src, enc_path, sig_path,
-                                       passphrase, iterations):
+                                       passphrase, iterations,
+                                       compress_threshold=compress_threshold):
                     bin_updated += 1
                     print(f"  [enc]  {rel}")
 
@@ -597,6 +641,11 @@ def cmd_index(conf):
     git_repo   = conf.get("GIT_REPO", "")
     show_mtxt  = conf.get("SHOW_MANIFEST_TXT", "yes") == "yes"
     show_mhtml = conf.get("SHOW_MANIFEST_HTML", "yes") == "yes"
+    show_appx  = conf.get("SHOW_APPENDIX", "no") == "yes"
+    show_corpus = conf.get("SHOW_CORPUS", "no") == "yes"
+    appx_path  = conf.get("APPENDIX_PATH", "corpus/appendix.html")
+    corpus_path_cfg = conf.get("CORPUS_PATH", "corpus/rawcorpus.html")
+    compress_threshold = int(conf.get("COMPRESS_THRESHOLD", 0))
 
     pp_file = utils_dir / "passphrase.txt"
     if not pp_file.exists() or not pp_file.stat().st_size:
@@ -657,14 +706,14 @@ li a:hover {{ color: #ddd; }}
        border-top: 1px solid #1a1a1a; padding-top: 0.8rem; }}
 </style></head><body>
 <div class="hdr"><h1>{domain} &mdash; {len(items)} documents</h1>
-<div><a class="fl" href="corpus/appendix.html">Appendix</a>
-<a class="fl" href="corpus/rawcorpus.html">Corpus</a>
+<div>{'<a class="fl" href="' + appx_path + '">Appendix</a>' if show_appx else ''}
+{'<a class="fl" href="' + corpus_path_cfg + '">Corpus</a>' if show_corpus else ''}
 <a class="fl" href="files/">Files &rarr;</a></div></div>
 <ul>{links}</ul>
 <p class="ft">{footer_html}</p>
 </body></html>"""
 
-    enc = encrypt(index_html.encode(), passphrase, iterations)
+    enc = encrypt(index_html.encode(), passphrase, iterations, compress_threshold)
     sig = gpg_sign_data(json.dumps(enc).encode())
     wrapped = wrap_html_encrypted(enc, domain, "index.html", sig, persist)
     (htdocs_dir / "index.html").write_text(wrapped)
@@ -717,15 +766,15 @@ td.h {{ color: #444; font-family: monospace; font-size: 0.7rem; }}
 </style></head><body>
 <h1>{domain} — {total} files
 <a href="/">&larr; Index</a>
-<a href="/corpus/appendix.html">Appendix</a>
-<a href="/corpus/rawcorpus.html">Corpus</a></h1>
+{'<a href="/' + appx_path + '">Appendix</a>' if show_appx else ''}
+{'<a href="/' + corpus_path_cfg + '">Corpus</a>' if show_corpus else ''}</h1>
 <div class="meta">GPG: <code>{fingerprint[:16]}...</code>
 &middot; <a href="pubkey.asc">pubkey.asc</a>
 &middot; Generated {gen_time}</div>
 {"".join(sec_html)}
 </body></html>"""
 
-    fenc = encrypt(files_page.encode(), passphrase, iterations)
+    fenc = encrypt(files_page.encode(), passphrase, iterations, compress_threshold)
     fsig = gpg_sign_data(json.dumps(fenc).encode())
     fwrapped = wrap_html_encrypted(fenc, f"{domain} — files", "files/index.html", fsig, persist)
     (files_dir / "index.html").write_text(fwrapped)
@@ -775,7 +824,7 @@ td a {{ color: #aaa; text-decoration: none; }}
 <h1>{domain} — Manifest ({len(items)} documents)</h1>
 <div class="meta">Generated: {gen_time}<br>
 GPG Fingerprint: <code>{fingerprint}</code><br>
-<a href="files/pubkey.asc">pubkey.asc</a> | <a href="manifest.txt">manifest.txt</a> | <a href="corpus/appendix.html">Appendix</a> | <a href="corpus/rawcorpus.html">Corpus</a></div>
+<a href="files/pubkey.asc">pubkey.asc</a> | <a href="manifest.txt">manifest.txt</a>{"" if not show_appx else ' | <a href="' + appx_path + '">Appendix</a>'}{"" if not show_corpus else ' | <a href="' + corpus_path_cfg + '">Corpus</a>'}</div>
 <table><tr><th>Title</th><th>File</th><th>SHA-256</th></tr>
 {"".join(mrows)}</table>
 </body></html>"""
@@ -796,6 +845,15 @@ def run_test():
     enc2 = encrypt(bindata, pp, 260000)
     assert decrypt(enc2, pp) == bindata
     print("  Binary: OK")
+    # Compression round-trip (threshold=1 forces compression)
+    big = b"The quick brown fox jumps over the lazy dog. " * 5000
+    enc3 = encrypt(big, pp, 260000, compress_threshold=1)
+    assert enc3.get("z") is True, "should be compressed"
+    assert decrypt(enc3, pp) == big
+    # Verify compressed ciphertext is smaller than uncompressed
+    enc4 = encrypt(big, pp, 260000, compress_threshold=0)
+    assert len(enc3["ct"]) < len(enc4["ct"]), "compression should reduce size"
+    print(f"  Compressed: OK ({len(enc4['ct'])}B -> {len(enc3['ct'])}B)")
     print("=== passed ===")
 
 

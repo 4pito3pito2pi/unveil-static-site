@@ -81,3 +81,20 @@ SHOW_MANIFEST_HTML=yes
 #   none     no rollback
 ROLLBACK=disk
 MAX_ROLLBACKS=2
+
+# Compression — zlib-compress plaintext before encryption for files above
+# this size (bytes). Client browser decompresses after decryption using
+# DecompressionStream API. Set to 0 to disable.
+#   102400 = 100KB (recommended — most HTML files benefit)
+#   0      = no compression
+COMPRESS_THRESHOLD=102400
+
+# Landing page prominent links — show Appendix and Corpus navigation
+#   yes  show link in landing page header, files page, and manifest
+#   no   hide (default)
+SHOW_APPENDIX=no
+SHOW_CORPUS=no
+
+# Paths for appendix/corpus links (relative to web root)
+# APPENDIX_PATH=corpus/appendix.html
+# CORPUS_PATH=corpus/rawcorpus.html
