@@ -648,7 +648,7 @@ body {{ font-family: sans-serif; background: #111; color: #ccc;
 .hdr {{ display: flex; justify-content: space-between; align-items: baseline;
         border-bottom: 1px solid #222; padding-bottom: 0.8rem; margin-bottom: 1.2rem; }}
 h1 {{ font-size: 1rem; color: #888; font-weight: normal; margin: 0; }}
-a.fl {{ font-size: 0.85rem; color: #7aa2c8; text-decoration: none; }}
+a.fl {{ font-size: 0.85rem; color: #7aa2c8; text-decoration: none; margin-left: 1rem; }}
 ul {{ list-style: none; padding: 0; margin: 0; column-count: 2; column-gap: 2rem; }}
 li {{ padding: 0.15rem 0; font-size: 0.85rem; break-inside: avoid; }}
 li a {{ color: #aaa; text-decoration: none; }}
@@ -657,7 +657,9 @@ li a:hover {{ color: #ddd; }}
        border-top: 1px solid #1a1a1a; padding-top: 0.8rem; }}
 </style></head><body>
 <div class="hdr"><h1>{domain} &mdash; {len(items)} documents</h1>
-<a class="fl" href="files/">Files &rarr;</a></div>
+<div><a class="fl" href="corpus/appendix.html">Appendix</a>
+<a class="fl" href="corpus/rawcorpus.html">Corpus</a>
+<a class="fl" href="files/">Files &rarr;</a></div></div>
 <ul>{links}</ul>
 <p class="ft">{footer_html}</p>
 </body></html>"""
@@ -713,7 +715,10 @@ td a:hover {{ color: #ddd; }}
 td.sz {{ color: #555; text-align: right; white-space: nowrap; width: 5rem; }}
 td.h {{ color: #444; font-family: monospace; font-size: 0.7rem; }}
 </style></head><body>
-<h1>{domain} — {total} files <a href="/">&larr; Index</a></h1>
+<h1>{domain} — {total} files
+<a href="/">&larr; Index</a>
+<a href="/corpus/appendix.html">Appendix</a>
+<a href="/corpus/rawcorpus.html">Corpus</a></h1>
 <div class="meta">GPG: <code>{fingerprint[:16]}...</code>
 &middot; <a href="pubkey.asc">pubkey.asc</a>
 &middot; Generated {gen_time}</div>
@@ -770,7 +775,7 @@ td a {{ color: #aaa; text-decoration: none; }}
 <h1>{domain} — Manifest ({len(items)} documents)</h1>
 <div class="meta">Generated: {gen_time}<br>
 GPG Fingerprint: <code>{fingerprint}</code><br>
-<a href="files/pubkey.asc">pubkey.asc</a> | <a href="manifest.txt">manifest.txt</a></div>
+<a href="files/pubkey.asc">pubkey.asc</a> | <a href="manifest.txt">manifest.txt</a> | <a href="corpus/appendix.html">Appendix</a> | <a href="corpus/rawcorpus.html">Corpus</a></div>
 <table><tr><th>Title</th><th>File</th><th>SHA-256</th></tr>
 {"".join(mrows)}</table>
 </body></html>"""
