@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-locksite — encrypt, sign, and publish a static website
+unveil (locksite) — encrypt, sign, and publish a static website
 
 Reads site.conf for configuration. All paths are configurable.
 

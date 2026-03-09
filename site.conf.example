@@ -1,0 +1,61 @@
+# unveil — site configuration
+# Copy to site.conf and edit. All settings have sensible defaults.
+#
+# Required: DOMAIN
+# Everything else is optional with documented defaults.
+
+# Domain name (required — used in indexes, manifests, GPG key)
+DOMAIN=example.com
+
+# Source directory (your original files + scripts)
+UTILS_DIR=/var/www/utils/$DOMAIN
+
+# Web root (where encrypted output goes)
+HTDOCS_DIR=/var/www/htdocs/$DOMAIN
+
+# Passphrase word count (default: 12, ~120 bits entropy)
+PASSPHRASE_WORDS=12
+
+# PBKDF2 iterations (higher = slower unlock, more secure)
+PBKDF2_ITERATIONS=260000
+
+# GPG key email for signing (auto-generated if not found)
+GPG_EMAIL=admin@$DOMAIN
+
+# Web server — bootstrap.sh generates config for the selected server
+#   openbsd-httpd  OpenBSD native httpd
+#   nginx          nginx with Let's Encrypt via certbot
+#   apache         Apache 2.4 with mod_ssl + certbot
+#   caddy          Caddy (automatic HTTPS, zero config TLS)
+#   none           no server config (static hosting, S3, etc.)
+HTTPD=none
+
+# TLS certificate provider
+#   acme    Let's Encrypt (acme-client on OpenBSD, certbot elsewhere)
+#   caddy   Caddy handles TLS automatically
+#   none    no TLS setup (you handle it, or plain HTTP)
+TLS=none
+
+# Passphrase persistence in browser
+#   none     prompt every page
+#   session  persist until tab/browser closes (sessionStorage)
+#   local    persist until manually cleared (localStorage)
+PASSPHRASE_PERSIST=session
+
+# Reveal mode — embed passphrase so pages auto-decrypt without prompting.
+# Encryption + signatures remain intact (proves authorship), content is public.
+#   none  all pages locked (default)
+#   all   entire site revealed
+# Per-directory: put files in html-public/ instead of html/
+# Per-file: list filenames in utils/reveal.txt (one per line)
+REVEAL=none
+
+# Hash tree — distribute encrypted files in a ternary directory tree
+# for efficient filesystem lookup on FFS/UFS (O(n) -> O(1) per level).
+#   flat     all files in one directory (default, fine for <1000 files)
+#   ternary  3-way hash tree (dirs named 0, 1, 2)
+HASH_TREE=flat
+
+# Tree depth (1-4). Capacity = 3^depth * 243 files.
+#   1 = 729, 2 = 2187, 3 = 6561, 4 = 19683
+HASH_TREE_DEPTH=4

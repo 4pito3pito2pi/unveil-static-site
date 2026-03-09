@@ -1,5 +1,5 @@
 #!/bin/sh
-# setup.sh — one-time setup for a locksite encrypted website
+# setup.sh — one-time setup for an unveil encrypted website
 #
 # Usage: sh setup.sh
 
@@ -10,7 +10,7 @@ CONF="$SCRIPT_DIR/site.conf"
 [ -f "$CONF" ] || { echo "Error: site.conf not found" >&2; exit 1; }
 eval "$(grep -v '^#' "$CONF" | grep '=' | sed 's/\$DOMAIN/'$(grep '^DOMAIN=' "$CONF" | cut -d= -f2)'/g')"
 
-echo "=== locksite setup: $DOMAIN ==="
+echo "=== unveil setup: $DOMAIN ==="
 echo
 
 # Directories

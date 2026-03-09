@@ -1,5 +1,5 @@
 #!/bin/sh
-# merge.sh — single entry point for locksite management
+# merge.sh — single entry point for unveil site management
 #
 # Usage:
 #   sh merge.sh                  Process add/ queue, then publish
