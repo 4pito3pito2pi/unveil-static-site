@@ -1,0 +1,6 @@
+# Add these lines to /etc/pf.conf
+# Place after your existing pass rules
+
+# Web traffic
+pass in  proto tcp from any to any port { 80, 443 }
+pass out proto tcp from any to any port { 80, 443 }
