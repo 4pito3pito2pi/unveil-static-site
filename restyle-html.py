@@ -120,8 +120,8 @@ def restyle(html):
     # Replace role labels with minimal voice indicators
     html = assign_voices(html)
 
-    # Anonymize export source
-    html = EXPORTED_PATTERN.sub('Exported', html)
+    # Strip export source meta line entirely
+    html = re.sub(r'<p class="meta">.*?Exported.*?</p>\s*', '', html)
 
     # Inject theme toggle after <body>
     html = html.replace('<body>', f'<body>\n  {THEME_TOGGLE_HTML}', 1)
