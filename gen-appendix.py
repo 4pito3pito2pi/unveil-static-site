@@ -24,6 +24,31 @@ CHARS_PER_LINE = 62  # monospace at 12pt
 MIN_OCCURRENCES = 3
 TOP_PAGES_PER_WORD = 81  # top adjacency-dense occurrences
 
+# Function words / stopwords — excluded from appendix so it shows
+# where nontrivial semantics start
+STOPWORDS = {
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'of', 'to', 'and', 'or', 'not', 'no', 'nor', 'but', 'if', 'so',
+    'in', 'on', 'at', 'by', 'for', 'with', 'from', 'as', 'into', 'about',
+    'it', 'its', 'this', 'that', 'these', 'those', 'they', 'them', 'their',
+    'you', 'your', 'we', 'our', 'me', 'my', 'he', 'she', 'his', 'her',
+    'i', 'us', 'who', 'whom', 'which', 'what', 'where', 'when', 'how',
+    'why', 'because', 'than', 'then', 'there', 'here',
+    'can', 'could', 'would', 'should', 'will', 'shall', 'may', 'might',
+    'must', 'do', 'does', 'did', 'has', 'have', 'had',
+    'just', 'only', 'also', 'very', 'more', 'most', 'now', 'all', 'any',
+    'some', 'each', 'every', 'both', 'few', 'many', 'much', 'own',
+    'one', 'two', 'first', 'like', 'want', 'let', 'same', 'between',
+    'under', 'over', 'after', 'before', 'up', 'out', 'down',
+    'without', 'within', 'through', 'during', 'against',
+    'too', 'yet', 'still', 'already', 'even', 'right', 'well',
+    'get', 'got', 'make', 'made', 'take', 'took', 'give', 'gave',
+    'go', 'went', 'come', 'came', 'know', 'knew', 'see', 'saw',
+    'say', 'said', 'think', 'thought', 'tell', 'told',
+    'cannot', 're', 'non', 'next', 'new', 'set', 'way', 'use', 'used',
+    'need', 'itself', 'about',
+}
+
 DARK_CSS = """
 :root {
   --bg: #111; --fg: #ccc; --bg2: #1a1a1a; --fg2: #888;
@@ -399,7 +424,7 @@ def main():
     corpus_path = os.path.join(corpus_dir, 'rawcorpus.txt')
     freq_path = os.path.join(corpus_dir, 'lexicalfrequency.txt')
 
-    # Load words with frequencies, filter >= MIN_OCCURRENCES, take top 81
+    # Load words with frequencies, skip stopwords, filter >= MIN_OCCURRENCES, take top 81
     all_words = []
     with open(freq_path) as f:
         for line in f:
@@ -409,6 +434,8 @@ def main():
                 if w == '*':
                     continue
                 if count < MIN_OCCURRENCES:
+                    continue
+                if w.lower() in STOPWORDS:
                     continue
                 all_words.append((w, count))
                 if len(all_words) >= 81:
