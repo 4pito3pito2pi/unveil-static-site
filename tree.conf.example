@@ -1,0 +1,18 @@
+# tree.conf — selective reveal by ternary tree path
+#
+# Only applies when HASH_TREE=ternary and TREE_CONF=tree.conf in site.conf.
+#
+# Each line maps a tree path prefix to reveal or lock.
+# Files hash deterministically to paths like 0/1/2/0/filename.html.
+# Use locksite.py encrypt to generate tree.txt (admin sitemap) showing
+# which files map to which paths.
+#
+# Format: <path_prefix>  reveal|lock
+# Wildcards: 0/* means everything under node 0 at that level.
+# More specific rules override less specific ones.
+#
+# Examples:
+#   0/*       reveal    # everything under node 0 is public
+#   1/0/*     reveal    # this specific branch too
+#   1/1/*     lock      # explicitly locked (default)
+#   2/*       lock      # everything under node 2 locked

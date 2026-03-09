@@ -59,3 +59,25 @@ HASH_TREE=flat
 # Tree depth (1-4). Capacity = 3^depth * 243 files.
 #   1 = 729, 2 = 2187, 3 = 6561, 4 = 19683
 HASH_TREE_DEPTH=4
+
+# Selective reveal by tree path — file in UTILS_DIR listing tree paths
+# to reveal or lock. See tree.conf.example. Only applies when HASH_TREE=ternary.
+# TREE_CONF=tree.conf
+
+# Landing page footer links (leave blank to hide)
+CONTACT_EMAIL=
+GIT_REPO=
+
+# Show manifest links on landing page
+#   yes  show link (default for manifest.txt)
+#   no   hide link
+SHOW_MANIFEST_TXT=yes
+SHOW_MANIFEST_HTML=yes
+
+# Rollback strategy
+#   disk     hardlink snapshots in .snapshots/ (default, max 2)
+#   tree     use unused ternary nodes for versioning (requires HASH_TREE=ternary)
+#   git      commit htdocs to a git repo after each publish
+#   none     no rollback
+ROLLBACK=disk
+MAX_ROLLBACKS=2

@@ -63,13 +63,64 @@ def flat_to_tree_path(filename: str, depth: int) -> Path:
     return Path(ternary_path(filename, depth)) / filename
 
 
-def should_reveal(filename: str, source_dir: str, conf: dict) -> bool:
+def load_tree_conf(conf: dict) -> dict:
+    """Load tree.conf — maps tree paths to reveal/lock states.
+
+    Format (one rule per line):
+      0/*       reveal    # everything under node 0
+      1/0/*     reveal    # specific branch
+      2/*       lock      # explicit lock (default)
+
+    Returns dict mapping path prefixes to "reveal" or "lock".
+    """
+    tree_conf_name = conf.get("TREE_CONF", "")
+    if not tree_conf_name:
+        return {}
+    tree_conf_path = Path(conf["UTILS_DIR"]) / tree_conf_name
+    if not tree_conf_path.exists():
+        return {}
+    rules = {}
+    for line in tree_conf_path.read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            rules[parts[0].rstrip("/")] = parts[1].lower()
+    return rules
+
+
+def tree_path_revealed(filename: str, depth: int, tree_rules: dict) -> bool:
+    """Check if a file's ternary path matches any reveal rule in tree.conf."""
+    if not tree_rules or depth == 0:
+        return False
+    tp = ternary_path(filename, depth)
+    # Check from most specific to least specific
+    parts = tp.split("/")
+    for i in range(len(parts), 0, -1):
+        prefix = "/".join(parts[:i])
+        if prefix in tree_rules:
+            return tree_rules[prefix] == "reveal"
+        if prefix + "/*" in tree_rules:
+            return tree_rules[prefix + "/*"] == "reveal"
+    # Check wildcard at each level
+    for i in range(len(parts)):
+        prefix = "/".join(parts[:i])
+        wild = (prefix + "/*") if prefix else "*"
+        if wild in tree_rules:
+            return tree_rules[wild] == "reveal"
+    return False
+
+
+def should_reveal(filename: str, source_dir: str, conf: dict,
+                  tree_rules: dict = None) -> bool:
     """Determine if a file should be revealed (auto-decrypt, no passphrase prompt).
 
-    Three levels of control:
+    Four levels of control:
       1. site.conf REVEAL=all — entire site is revealed
       2. Per-directory — files in public/ or html-public/ dirs are revealed
       3. Per-file — filenames listed in utils/reveal.txt are revealed
+      4. Per-tree-path — paths listed in tree.conf (requires HASH_TREE=ternary)
     """
     if conf.get("REVEAL", "none") == "all":
         return True
@@ -80,6 +131,10 @@ def should_reveal(filename: str, source_dir: str, conf: dict) -> bool:
         revealed = {l.strip() for l in reveal_file.read_text().splitlines()
                     if l.strip() and not l.startswith("#")}
         if filename in revealed:
+            return True
+    if tree_rules and conf.get("HASH_TREE") == "ternary":
+        depth = conf.get("HASH_TREE_DEPTH", 4)
+        if tree_path_revealed(filename, depth, tree_rules):
             return True
     return False
 
@@ -101,6 +156,13 @@ def load_conf(conf_path: Path = None) -> dict:
         "REVEAL": "none",
         "HASH_TREE": "flat",
         "HASH_TREE_DEPTH": "4",
+        "TREE_CONF": "",
+        "CONTACT_EMAIL": "",
+        "GIT_REPO": "",
+        "SHOW_MANIFEST_TXT": "yes",
+        "SHOW_MANIFEST_HTML": "yes",
+        "ROLLBACK": "disk",
+        "MAX_ROLLBACKS": "2",
     }
     if conf_path is None:
         for candidate in [Path("site.conf"), Path(__file__).parent / "site.conf"]:
@@ -121,6 +183,7 @@ def load_conf(conf_path: Path = None) -> dict:
         conf[k] = conf[k].replace("$DOMAIN", domain)
     conf["PBKDF2_ITERATIONS"] = int(conf["PBKDF2_ITERATIONS"])
     conf["HASH_TREE_DEPTH"] = int(conf["HASH_TREE_DEPTH"])
+    conf["MAX_ROLLBACKS"] = int(conf["MAX_ROLLBACKS"])
     return conf
 
 
@@ -418,6 +481,7 @@ def cmd_encrypt(conf):
     persist    = conf.get("PASSPHRASE_PERSIST", "session")
     use_tree   = conf.get("HASH_TREE", "flat") == "ternary"
     tree_depth = conf.get("HASH_TREE_DEPTH", 4)
+    tree_rules = load_tree_conf(conf)
 
     pp_file = utils_dir / "passphrase.txt"
     if not pp_file.exists() or not pp_file.stat().st_size:
@@ -429,6 +493,11 @@ def cmd_encrypt(conf):
     if use_tree:
         print(f"  Hash tree: ternary, depth={tree_depth}, "
               f"capacity={3**tree_depth * HASH_TREE_MAX_LEAF}")
+    if tree_rules:
+        print(f"  Tree reveal rules: {len(tree_rules)}")
+
+    # Sitemap for admin (written to UTILS_DIR, not published)
+    sitemap_lines = []
 
     html_count = html_updated = bin_count = bin_updated = 0
 
@@ -452,9 +521,15 @@ def cmd_encrypt(conf):
                 dest_base = files_dir / rel
             dest_base.parent.mkdir(parents=True, exist_ok=True)
 
+            revealed = should_reveal(src.name, subdir.name, conf, tree_rules)
+            sitemap_lines.append(
+                f"{rel}\t->\t{dest_base.relative_to(htdocs_dir)}"
+                f"\t{'[reveal]' if revealed else '[locked]'}"
+            )
+
             if src.suffix.lower() in HTML_EXTENSIONS:
                 html_count += 1
-                reveal_pw = passphrase if should_reveal(src.name, subdir.name, conf) else None
+                reveal_pw = passphrase if revealed else None
                 tag = "reveal" if reveal_pw else "html"
                 if encrypt_html_file(src, dest_base,
                                      passphrase, iterations, persist,
@@ -469,6 +544,15 @@ def cmd_encrypt(conf):
                                        passphrase, iterations):
                     bin_updated += 1
                     print(f"  [enc]  {rel}")
+
+    # Write admin sitemap
+    if sitemap_lines:
+        sitemap_path = utils_dir / "tree.txt"
+        header = f"# Sitemap — {conf['DOMAIN']} — {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}\n"
+        header += f"# {len(sitemap_lines)} files\n"
+        header += "# source\t->\tpublished\tstatus\n"
+        sitemap_path.write_text(header + "\n".join(sitemap_lines) + "\n")
+        print(f"  tree.txt -> {sitemap_path}")
 
     print(f"\n  HTML: {html_updated}/{html_count}, Other: {bin_updated}/{bin_count}")
 
@@ -507,7 +591,12 @@ def cmd_index(conf):
     files_html = files_dir / "html"
     iterations = conf["PBKDF2_ITERATIONS"]
     persist    = conf.get("PASSPHRASE_PERSIST", "session")
-    use_tree   = conf.get("HASH_TREE", "flat") == "ternary"
+
+    # Config-driven footer links
+    contact    = conf.get("CONTACT_EMAIL", "")
+    git_repo   = conf.get("GIT_REPO", "")
+    show_mtxt  = conf.get("SHOW_MANIFEST_TXT", "yes") == "yes"
+    show_mhtml = conf.get("SHOW_MANIFEST_HTML", "yes") == "yes"
 
     pp_file = utils_dir / "passphrase.txt"
     if not pp_file.exists() or not pp_file.stat().st_size:
@@ -524,16 +613,31 @@ def cmd_index(conf):
     for f in files_html.rglob("*"):
         if f.is_file() and f.suffix.lower() in HTML_EXTENSIONS:
             if f.name in seen:
-                continue  # skip duplicates (e.g. flat + tree coexist)
+                continue
             title = extract_encrypted_title(f.read_text(errors="replace"), f.stem)
             href = "files/html/" + str(f.relative_to(files_html))
             seen[f.name] = (f.name, title, href)
-    items = sorted(seen.values(), key=lambda x: x[1].lower())  # sort by title
+    items = sorted(seen.values(), key=lambda x: x[1].lower())
+
+    fingerprint = get_gpg_fingerprint()
+    gen_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
     print(f"  Building index: {len(items)} documents")
 
+    # ── Build footer links from config ────────────────────────────────────
+    footer_parts = [f"Generated {gen_time}"]
+    footer_parts.append('<a href="files/pubkey.asc" style="color:#555">pubkey.asc</a>')
+    if show_mtxt:
+        footer_parts.append('<a href="manifest.txt" style="color:#555">manifest.txt</a>')
+    if show_mhtml:
+        footer_parts.append('<a href="manifest.html" style="color:#555">manifest</a>')
+    if contact:
+        footer_parts.append(f'<a href="mailto:{contact}" style="color:#555">{contact}</a>')
+    if git_repo:
+        footer_parts.append(f'<a href="{git_repo}" style="color:#555">source</a>')
+    footer_html = " &middot; ".join(footer_parts)
+
     # ── Root index.html ───────────────────────────────────────────────────
-    generated = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     links = "\n".join(f'<li><a href="{h}">{t}</a></li>' for _, t, h in items)
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -555,8 +659,7 @@ li a:hover {{ color: #ddd; }}
 <div class="hdr"><h1>{domain} &mdash; {len(items)} documents</h1>
 <a class="fl" href="files/">Files &rarr;</a></div>
 <ul>{links}</ul>
-<p class="ft">Generated {generated} &middot; <a href="manifest.html" style="color:#555">manifest</a>
-&middot; <a href="files/pubkey.asc" style="color:#333">pubkey.asc</a></p>
+<p class="ft">{footer_html}</p>
 </body></html>"""
 
     enc = encrypt(index_html.encode(), passphrase, iterations)
@@ -565,7 +668,8 @@ li a:hover {{ color: #ddd; }}
     (htdocs_dir / "index.html").write_text(wrapped)
     print(f"  index.html")
 
-    # ── files/index.html ──────────────────────────────────────────────────
+    # ── files/index.html — combined file browser + manifest ──────────────
+    # Collect all published files grouped by type
     sections = {}
     for p in sorted(files_dir.rglob("*")):
         if not p.is_file(): continue
@@ -574,7 +678,9 @@ li a:hover {{ color: #ddd; }}
         parts = rel.parts
         if parts[0] in SKIP_DIRS: continue
         section = parts[0] if len(parts) > 1 else "."
-        sections.setdefault(section, []).append((str(rel), p.name, p.stat().st_size))
+        sha = hashlib.sha256(p.read_bytes()).hexdigest()[:16]
+        sections.setdefault(section, []).append(
+            (str(rel), p.name, p.stat().st_size, sha))
 
     total = sum(len(v) for v in sections.values())
     sec_html = []
@@ -582,17 +688,22 @@ li a:hover {{ color: #ddd; }}
         files = sections[sn]
         label = sn if sn != "." else "root"
         rows = "\n".join(
-            f'<tr><td><a href="{r}">{n}</a></td><td class="sz">{human_size(s)}</td></tr>'
-            for r, n, s in sorted(files, key=lambda x: x[1].lower()))
+            f'<tr><td><a href="{r}">{n}</a></td>'
+            f'<td class="sz">{human_size(s)}</td>'
+            f'<td class="h">{sha}...</td></tr>'
+            for r, n, s, sha in sorted(files, key=lambda x: x[1].lower()))
         sec_html.append(f'<h2>{label}/ ({len(files)})</h2>\n<table>{rows}</table>')
 
     files_page = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>{domain} — files</title>
 <style>
 body {{ font-family: sans-serif; background: #111; color: #ccc;
-       max-width: 800px; margin: 2rem auto; padding: 0 1rem; }}
+       max-width: 900px; margin: 2rem auto; padding: 0 1rem; }}
 h1 {{ font-size: 1rem; color: #888; font-weight: normal; border-bottom: 1px solid #222; padding-bottom: 0.8rem; }}
 h1 a {{ color: #7aa2c8; text-decoration: none; font-size: 0.85rem; margin-left: 1rem; }}
+.meta {{ font-size: 0.78rem; color: #555; margin-bottom: 1.5rem; }}
+.meta code {{ background: #1a1a1a; padding: 1px 4px; border-radius: 3px; }}
+.meta a {{ color: #7aa2c8; }}
 h2 {{ font-size: 0.9rem; color: #777; margin: 1.5rem 0 0.5rem; }}
 table {{ width: 100%; border-collapse: collapse; }}
 tr:hover {{ background: #1a1a1a; }}
@@ -600,8 +711,12 @@ td {{ padding: 0.2rem 0.4rem; font-size: 0.82rem; }}
 td a {{ color: #aaa; text-decoration: none; }}
 td a:hover {{ color: #ddd; }}
 td.sz {{ color: #555; text-align: right; white-space: nowrap; width: 5rem; }}
+td.h {{ color: #444; font-family: monospace; font-size: 0.7rem; }}
 </style></head><body>
 <h1>{domain} — {total} files <a href="/">&larr; Index</a></h1>
+<div class="meta">GPG: <code>{fingerprint[:16]}...</code>
+&middot; <a href="pubkey.asc">pubkey.asc</a>
+&middot; Generated {gen_time}</div>
 {"".join(sec_html)}
 </body></html>"""
 
@@ -609,37 +724,35 @@ td.sz {{ color: #555; text-align: right; white-space: nowrap; width: 5rem; }}
     fsig = gpg_sign_data(json.dumps(fenc).encode())
     fwrapped = wrap_html_encrypted(fenc, f"{domain} — files", "files/index.html", fsig, persist)
     (files_dir / "index.html").write_text(fwrapped)
-    print(f"  files/index.html")
+    print(f"  files/index.html (combined browser + manifest)")
 
-    # ── Manifests (unencrypted — for web archivers) ───────────────────────
-    fingerprint = get_gpg_fingerprint()
-    gen_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    # ── manifest.txt (unencrypted — for web archivers) ────────────────────
+    if show_mtxt:
+        lines = [f"MANIFEST — {domain}", f"Generated: {gen_time}",
+                 f"GPG Fingerprint: {fingerprint}",
+                 f"Public Key: https://{domain}/files/pubkey.asc",
+                 f"Documents: {len(items)}", "", "-" * 80, ""]
+        for filename, title, href in items:
+            ep = htdocs_dir / href
+            sha = hashlib.sha256(ep.read_bytes()).hexdigest() if ep.exists() else ""
+            gsig = extract_gpg_sig(ep.read_text(errors="replace")) if ep.exists() else ""
+            lines += [f"Title:    {title}", f"File:     {filename}",
+                      f"URL:      https://{domain}/{href}", f"SHA-256:  {sha}"]
+            if gsig: lines.append(f"GPG Sig:  {gsig}")
+            lines.append("")
+        (htdocs_dir / "manifest.txt").write_text("\n".join(lines))
+        print(f"  manifest.txt")
 
-    # manifest.txt
-    lines = [f"MANIFEST — {domain}", f"Generated: {gen_time}",
-             f"GPG Fingerprint: {fingerprint}",
-             f"Public Key: https://{domain}/files/pubkey.asc",
-             f"Documents: {len(items)}", "", "-" * 80, ""]
-    for filename, title, href in items:
-        ep = htdocs_dir / href
-        sha = hashlib.sha256(ep.read_bytes()).hexdigest() if ep.exists() else ""
-        gsig = extract_gpg_sig(ep.read_text(errors="replace")) if ep.exists() else ""
-        lines += [f"Title:    {title}", f"File:     {filename}",
-                  f"URL:      https://{domain}/{href}", f"SHA-256:  {sha}"]
-        if gsig: lines.append(f"GPG Sig:  {gsig}")
-        lines.append("")
-    (htdocs_dir / "manifest.txt").write_text("\n".join(lines))
-    print(f"  manifest.txt")
-
-    # manifest.html
-    rows = []
-    for filename, title, href in items:
-        ep = htdocs_dir / href
-        sha = hashlib.sha256(ep.read_bytes()).hexdigest()[:16] + "..." if ep.exists() else ""
-        rows.append(f'<tr><td class="t">{title}</td>'
-                    f'<td><a href="{href}">{filename}</a></td>'
-                    f'<td class="h">{sha}</td></tr>')
-    manifest_page = f"""<!DOCTYPE html>
+    # ── manifest.html (unencrypted — browseable manifest) ─────────────────
+    if show_mhtml:
+        mrows = []
+        for filename, title, href in items:
+            ep = htdocs_dir / href
+            sha = hashlib.sha256(ep.read_bytes()).hexdigest()[:16] + "..." if ep.exists() else ""
+            mrows.append(f'<tr><td class="t">{title}</td>'
+                         f'<td><a href="{href}">{filename}</a></td>'
+                         f'<td class="h">{sha}</td></tr>')
+        manifest_page = f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><title>{domain} — Manifest</title>
 <style>
 body {{ font-family: monospace; background: #111; color: #ccc;
@@ -659,10 +772,10 @@ td a {{ color: #aaa; text-decoration: none; }}
 GPG Fingerprint: <code>{fingerprint}</code><br>
 <a href="files/pubkey.asc">pubkey.asc</a> | <a href="manifest.txt">manifest.txt</a></div>
 <table><tr><th>Title</th><th>File</th><th>SHA-256</th></tr>
-{"".join(rows)}</table>
+{"".join(mrows)}</table>
 </body></html>"""
-    (htdocs_dir / "manifest.html").write_text(manifest_page)
-    print(f"  manifest.html")
+        (htdocs_dir / "manifest.html").write_text(manifest_page)
+        print(f"  manifest.html")
 
 
 # ── Test ───────────────────────────────────────────────────────────────────────
@@ -681,34 +794,163 @@ def run_test():
     print("=== passed ===")
 
 
-# ── Snapshots / rollback ───────────────────────────────────────────────────────
+# ── Rollback ──────────────────────────────────────────────────────────────────
+#
+# Three strategies controlled by ROLLBACK= in site.conf:
+#
+#   disk  — hardlink snapshots in .snapshots/ (works for all tree modes)
+#   tree  — use unused ternary nodes for versioning (requires HASH_TREE=ternary)
+#           Each file hashes to slot 0. Slots 1 and 2 hold previous versions.
+#           Rollback = swap the version map. Max 2 rollbacks per file.
+#   git   — commit htdocs to a local git repo after each publish
+#   none  — no rollback
 
-MAX_SNAPSHOTS = 5  # keep last N snapshots
+TREE_VERSION_FILE = "hashmap.json"  # tracks which ternary slot is current
 
 def snapshot_dir(conf) -> Path:
     return Path(conf["UTILS_DIR"]) / ".snapshots"
 
+
 def create_snapshot(conf):
-    """Snapshot htdocs before publishing. Uses hardlinks for efficiency."""
+    """Create a rollback point before publishing."""
+    strategy = conf.get("ROLLBACK", "disk")
+    if strategy == "none":
+        return
+    elif strategy == "tree" and conf.get("HASH_TREE") == "ternary":
+        create_tree_snapshot(conf)
+    elif strategy == "git":
+        create_git_snapshot(conf)
+    else:
+        create_disk_snapshot(conf)
+
+
+def create_disk_snapshot(conf):
+    """Hardlink snapshot of htdocs."""
     import shutil
     htdocs = Path(conf["HTDOCS_DIR"])
     if not htdocs.exists():
         return
+    max_snaps = conf.get("MAX_ROLLBACKS", 2)
     sdir = snapshot_dir(conf)
     sdir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     dest = sdir / stamp
     shutil.copytree(htdocs, dest, copy_function=os.link)
     print(f"  Snapshot: {stamp}")
-    # Prune old snapshots
     snaps = sorted(sdir.iterdir())
-    while len(snaps) > MAX_SNAPSHOTS:
+    while len(snaps) > max_snaps:
         old = snaps.pop(0)
         shutil.rmtree(old)
         print(f"  Pruned: {old.name}")
 
+
+def load_hashmap(conf) -> dict:
+    """Load ternary version map: {filename: current_slot (0, 1, or 2)}."""
+    hm_path = Path(conf["UTILS_DIR"]) / TREE_VERSION_FILE
+    if hm_path.exists():
+        return json.loads(hm_path.read_text())
+    return {}
+
+
+def save_hashmap(conf, hm: dict):
+    """Save ternary version map."""
+    hm_path = Path(conf["UTILS_DIR"]) / TREE_VERSION_FILE
+    hm_path.write_text(json.dumps(hm, indent=2, sort_keys=True))
+
+
+def ternary_path_versioned(filename: str, depth: int, slot_offset: int = 0) -> str:
+    """Ternary path with slot offset for versioning.
+
+    slot_offset=0: current (default hash)
+    slot_offset=1: previous version (shift first digit by +1 mod 3)
+    slot_offset=2: version before that (shift first digit by +2 mod 3)
+    """
+    h = hashlib.sha256(filename.encode()).digest()
+    n = int.from_bytes(h[:8], "big")
+    digits = []
+    for i in range(depth):
+        d = n % 3
+        if i == 0:
+            d = (d + slot_offset) % 3  # shift first digit for versioning
+        digits.append(str(d))
+        n //= 3
+    return "/".join(digits)
+
+
+def create_tree_snapshot(conf):
+    """Version files by copying current to the next ternary slot.
+
+    Before publishing new content, copy current files from slot N to slot N+1.
+    This preserves the previous version in an adjacent tree node.
+    """
+    htdocs_dir = Path(conf["HTDOCS_DIR"])
+    files_dir = htdocs_dir / "files"
+    depth = conf.get("HASH_TREE_DEPTH", 4)
+    hm = load_hashmap(conf)
+
+    versioned = 0
+    for subtype_dir in sorted(files_dir.iterdir()):
+        if not subtype_dir.is_dir():
+            continue
+        # Walk current files
+        for f in subtype_dir.rglob("*"):
+            if not f.is_file():
+                continue
+            fname = f.name
+            current_slot = hm.get(fname, 0)
+            backup_slot = (current_slot + 1) % 3  # next slot
+
+            # Compute paths
+            current_tp = ternary_path_versioned(fname, depth, current_slot)
+            backup_tp = ternary_path_versioned(fname, depth, backup_slot)
+
+            current_path = files_dir / subtype_dir.name / current_tp / fname
+            backup_path = files_dir / subtype_dir.name / backup_tp / fname
+
+            if current_path.exists() and current_path == f:
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                import shutil
+                shutil.copy2(str(current_path), str(backup_path))
+                versioned += 1
+
+    if versioned:
+        print(f"  Tree snapshot: {versioned} files versioned")
+
+
+def create_git_snapshot(conf):
+    """Commit htdocs to a local git repo."""
+    htdocs = Path(conf["HTDOCS_DIR"])
+    git_dir = htdocs / ".git"
+    if not git_dir.exists():
+        subprocess.run(["git", "init"], cwd=str(htdocs),
+                       capture_output=True)
+    stamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    subprocess.run(["git", "add", "-A"], cwd=str(htdocs), capture_output=True)
+    result = subprocess.run(
+        ["git", "commit", "-m", f"publish {stamp}"],
+        cwd=str(htdocs), capture_output=True, text=True)
+    if result.returncode == 0:
+        print(f"  Git snapshot: {stamp}")
+    else:
+        print(f"  Git snapshot: nothing to commit")
+
+
 def cmd_rollback(conf):
     """Restore the most recent snapshot."""
+    strategy = conf.get("ROLLBACK", "disk")
+    if strategy == "none":
+        print("Rollback disabled (ROLLBACK=none).", file=sys.stderr)
+        sys.exit(1)
+    elif strategy == "tree" and conf.get("HASH_TREE") == "ternary":
+        cmd_rollback_tree(conf)
+    elif strategy == "git":
+        cmd_rollback_git(conf)
+    else:
+        cmd_rollback_disk(conf)
+
+
+def cmd_rollback_disk(conf):
+    """Restore from disk snapshot."""
     import shutil
     sdir = snapshot_dir(conf)
     htdocs = Path(conf["HTDOCS_DIR"])
@@ -721,29 +963,99 @@ def cmd_rollback(conf):
         sys.exit(1)
     latest = snaps[-1]
     print(f"Rolling back to snapshot: {latest.name}")
-    # Remove current htdocs and replace with snapshot
     if htdocs.exists():
         shutil.rmtree(htdocs)
     shutil.copytree(latest, htdocs)
-    # Remove the used snapshot
     shutil.rmtree(latest)
     print(f"Rollback complete. Site restored to {latest.name}")
 
+
+def cmd_rollback_tree(conf):
+    """Rollback by swapping ternary slots.
+
+    For each file, shift the active slot back by 1. The previous version
+    is already sitting in the adjacent node — just update the hashmap.
+    """
+    hm = load_hashmap(conf)
+    htdocs_dir = Path(conf["HTDOCS_DIR"])
+    files_dir = htdocs_dir / "files"
+    depth = conf.get("HASH_TREE_DEPTH", 4)
+
+    rolled = 0
+    for fname, current_slot in list(hm.items()):
+        prev_slot = (current_slot - 1) % 3
+        # Check that the previous slot file actually exists
+        for subtype_dir in files_dir.iterdir():
+            if not subtype_dir.is_dir():
+                continue
+            prev_tp = ternary_path_versioned(fname, depth, prev_slot)
+            prev_path = subtype_dir / prev_tp / fname
+            if prev_path.exists():
+                hm[fname] = prev_slot
+                rolled += 1
+                break
+
+    if rolled:
+        save_hashmap(conf, hm)
+        print(f"Rollback: {rolled} files reverted to previous version")
+        print("Run 'locksite.py index' to rebuild indexes")
+    else:
+        print("No previous versions found in tree.", file=sys.stderr)
+
+
+def cmd_rollback_git(conf):
+    """Rollback via git revert."""
+    htdocs = Path(conf["HTDOCS_DIR"])
+    result = subprocess.run(
+        ["git", "log", "--oneline", "-1"],
+        cwd=str(htdocs), capture_output=True, text=True)
+    if result.returncode != 0:
+        print("No git history found.", file=sys.stderr)
+        sys.exit(1)
+    print(f"Reverting: {result.stdout.strip()}")
+    subprocess.run(["git", "revert", "--no-edit", "HEAD"],
+                   cwd=str(htdocs))
+    print("Rollback complete.")
+
+
 def cmd_snapshots(conf):
-    """List available snapshots."""
-    sdir = snapshot_dir(conf)
-    if not sdir.exists():
-        print("No snapshots.")
-        return
-    snaps = sorted(sdir.iterdir())
-    if not snaps:
-        print("No snapshots.")
-        return
-    print(f"Available snapshots ({len(snaps)}):")
-    for s in snaps:
-        # Count files in snapshot
-        n = sum(1 for _ in s.rglob("*") if _.is_file())
-        print(f"  {s.name}  ({n} files)")
+    """List available snapshots/versions."""
+    strategy = conf.get("ROLLBACK", "disk")
+    if strategy == "tree":
+        hm = load_hashmap(conf)
+        if hm:
+            print(f"Tree versioning: {len(hm)} files tracked")
+            slots_used = {}
+            for fname, slot in hm.items():
+                slots_used.setdefault(slot, 0)
+                slots_used[slot] += 1
+            for slot, count in sorted(slots_used.items()):
+                print(f"  Slot {slot}: {count} files")
+        else:
+            print("No tree versions.")
+    elif strategy == "git":
+        htdocs = Path(conf["HTDOCS_DIR"])
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-5"],
+            cwd=str(htdocs), capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            print("Git snapshots:")
+            print(result.stdout)
+        else:
+            print("No git snapshots.")
+    else:
+        sdir = snapshot_dir(conf)
+        if not sdir.exists():
+            print("No snapshots.")
+            return
+        snaps = sorted(sdir.iterdir())
+        if not snaps:
+            print("No snapshots.")
+            return
+        print(f"Disk snapshots ({len(snaps)}):")
+        for s in snaps:
+            n = sum(1 for _ in s.rglob("*") if _.is_file())
+            print(f"  {s.name}  ({n} files)")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
